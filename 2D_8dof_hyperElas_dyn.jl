@@ -122,43 +122,22 @@ callback = function (p, l)
     return false
 end
 
-"""
-# Adam is great for getting in the right ballpark of the solution, a "rough pass":
-res = Optimization.solve(prob,Adam(1.0e-1); callback = callback, maxiters=500)
-
-# A "refining pass" with Adam:
-prob = remake(prob, u0 = res.u)
-res = Optimization.solve(prob,Adam(1.0e-2); callback = callback, maxiters=1000)
-
-# Another "refining pass" with Adam:
-prob = remake(prob, u0 = res.u)
-res = Optimization.solve(prob,Adam(1.0e-3); callback = callback, maxiters=1000)
-"""
-# LBFGS drills down to finer scales:
-#prob = remake(prob, u0 = res.u)
-#res = Optimization.solve(prob, NelderMead(); callback = callback, maxiters = 1000)
-#res = Optimization.solve(prob, ConjugateGradient(); callback = callback, maxiters = 100)
-res = Optimization.solve(prob, LBFGS(); callback = callback, maxiters = 10000)
-#res = Optimization.solve(prob, BFGS(); callback = callback, maxiters = 100)
-
-#prob = remake(prob, u0 = res.u)
-#res = Optimization.solve(prob,Adam(1.0e-3); callback = callback, maxiters=1000)
+# Here LBFGS does a great job, although each step is quite computationally expensive.
+# Definitely more experimentation is needed to determine optimal training strategy for the dynamic PINN.
+res = Optimization.solve(prob, LBFGS(); callback = callback, maxiters = 1000)
 
 using Plots, ColorSchemes, LaTeXStrings
 
 plot(loss_vector, legend=false, yaxis=:log, 
               xlabel="Steps", ylabel="Loss",dpi=600,
               ylimits = (1e-3,1e6))
-savefig("PINN_images_8dof_dyn/loss_convergence")
+savefig("loss_convergence")
 
 
 phi = discretization.phi
 ts,xs,ys = [infimum(d.domain):0.01:supremum(d.domain) for d in domains]
 
 minimizers_ = [res.u.depvar[sym_prob.depvars[i]] for i in 1:dofs]
-
-#u_predict  = [[phi[i]([x,y],minimizers_[i])[1] for y in ys  for x in xs] for i in 1:dofs]
-
 
 meshX = vec((xs'.*ones(size(ys)))')
 meshY = vec((ones(size(xs))'.*ys)')
@@ -177,8 +156,7 @@ function plot_(phi, minimizers_, ind)
                      marker_z=uind_predict,  c =:coolwarm, aspect_ratio=:equal)
            scatter(defplot_uind, legend=false, dpi=150, size = (800, 400), aspect_ratio=:equal)
        end
-       gif(anim,"PINN_images_8dof_dyn/u2_anim.gif", fps=20)
+       gif(anim,"u2_anim.gif", fps=20)
 end
    
 plot_(phi, minimizers_, 2)
-   
