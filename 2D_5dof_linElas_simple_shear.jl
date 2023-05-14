@@ -10,7 +10,7 @@ using OptimizationOptimisers
 using Random
 
 @parameters x, y
-@variables u1(..), u2(..), σ11(..), σ22(..), σ12(..)
+@variables u1(..), u2(..), TR11(..), TR22(..), TR12(..), TR21(..)
 Dy = Differential(y)
 Dx = Differential(x)
 
@@ -19,25 +19,45 @@ Gshear = 1 # MPa
 Kbulk  = 1 # MPa
 lambda = Kbulk - (2.0/3.0)*Gshear
 
-# Governing equations for force balance, constitutive relations
-eqs = [Dx(σ11(x,y)) + Dy(σ12(x,y)) ~ 0.0, 
-       Dx(σ12(x,y)) + Dy(σ22(x,y)) ~ 0.0,
-       σ11(x,y) ~ lambda*(Dx(u1(x,y)) + Dy(u2(x,y))) + 2.0*Gshear*Dx(u1(x,y)),
-       σ22(x,y) ~ lambda*(Dx(u1(x,y)) + Dy(u2(x,y))) + 2.0*Gshear*Dy(u2(x,y)),
-       σ12(x,y) ~ Gshear*(Dy(u1(x,y)) + Dx(u2(x,y))) ]
 
-λ_u = 1.0 # Amplification factor for enforcing the disp. boundary conditions
-λ_σ = 1.0 # Amplification factor for enforcing the stress boundary conditions
+# Kinematics 
+#
+# The (plane strain) deformation gradient:
+F = [1.0 + Dx(u1(x,y)), Dy(u1(x,y)), 0,
+       Dx(u2(x,y)), 1.0 + Dy(u2(x,y)), 0,
+ 		0, 0, 1.0]
+# F as a matrix
+Fmat = reshape(F, (3,3))'
+#
+# F^{-T}
+Fit = inv(Fmat')
+#
+# J = det(F)
+J = det(Fmat)
+
+# Piola Stress
+TR = Gshear*(Fmat - Fit) + Kbulk*(J-1)*Fit
+
+# Governing eqs
+eqs = [Dx(TR11(x,y)) + Dy(TR21(x,y)) ~ 0,
+       Dx(TR12(x,y)) + Dy(TR22(x,y)) ~ 0, 
+       TR11(x,y) ~ TR[1,1],
+       TR22(x,y) ~ TR[2,2],
+       TR21(x,y) ~ TR[1,2],
+       TR12(x,y) ~ TR[2,1]]
+
+λ_u = 10.0 # Amplification factor for enforcing the disp. boundary conditions
+λ_σ = 10.0 # Amplification factor for enforcing the stress boundary conditions
 
 # BCs for simple shear
 bcs = [λ_u*u1(x,0)  ~ λ_u*0.0,
        λ_u*u2(x,0)  ~ λ_u*0.0,
-       λ_u*u1(x,1)  ~ λ_u*0.01,
-       λ_u*u2(x,1)  ~ λ_u*0.0,
-       λ_σ*σ11(0,y) ~ λ_σ*0.0,
-       λ_σ*σ12(0,y) ~ λ_σ*0.0,
-       λ_σ*σ11(1,y) ~ λ_σ*0.0,
-       λ_σ*σ12(1,y) ~ λ_σ*0.0
+       λ_u*u1(x,1)  ~ λ_u*0.0, 
+       λ_u*u2(x,1)  ~ λ_u*1.0, # Beeeeg stretch (λ=2)
+       λ_σ*TR11(0,y) ~ λ_σ*0.0,
+       λ_σ*TR21(0,y) ~ λ_σ*0.0,
+       λ_σ*TR11(1,y) ~ λ_σ*0.0,
+       λ_σ*TR21(1,y) ~ λ_σ*0.0
        ] 
 
 # Space and time domains
@@ -46,7 +66,7 @@ domains = [x ∈ Interval(0.0,1.0),
 
 # Neural network
 input_ = length(domains) # number of inputs (dimensions)
-dofs   = 5               # number of variables expressed by NNs
+dofs   = 6               # number of variables expressed by NNs
 n      = 5              # dimension of hidden NN layer
 chain =[Lux.Chain(Dense(input_,n),
                   Dense(n,     n, Lux.tanh_fast),
@@ -70,7 +90,7 @@ discretization = PhysicsInformedNN(chain, strategy,
 """
 discretization = PhysicsInformedNN(chain, strategy)
 
-@named pdesystem = PDESystem(eqs,bcs,domains,[x,y],[u1(x, y),u2(x, y), σ11(x,y), σ22(x,y), σ12(x,y)])
+@named pdesystem = PDESystem(eqs,bcs,domains,[x,y],[u1(x, y),u2(x, y), TR11(x,y), TR22(x,y), TR12(x,y), TR21(x,y)])
 prob = discretize(pdesystem,discretization)
 sym_prob = symbolic_discretize(pdesystem,discretization)
 
@@ -80,30 +100,25 @@ bcs_inner_loss_functions = sym_prob.loss_functions.bc_loss_functions
 loss_vector = Vector{Float64}()
 
 callback = function (p, l)
+    push!(loss_vector, l)
+    stepnum = length(loss_vector)
+    @info "Step number $stepnum."
     println("loss: ", l)
     println("pde_losses: ", map(l_ -> l_(p), pde_inner_loss_functions))
     println("bcs_losses: ", map(l_ -> l_(p), bcs_inner_loss_functions))
-    push!(loss_vector, l)
     return false
 end
 
-# Adam is great for getting in the right ballpark of the solution, a "rough pass":
-@elapsed res = Optimization.solve(prob,Adam(1.0e-3); callback = callback, maxiters=2000)
-
-# A "refining pass" with Adam:
-prob = remake(prob, u0 = res.u)
-@elapsed res = Optimization.solve(prob,Adam(1.0e-4); callback = callback, maxiters=2000)
-
-# LBFGS drills down to finer scales:
-prob = remake(prob, u0 = res.u)
-@elapsed res = Optimization.solve(prob, LBFGS(); callback = callback, maxiters = 5000)
+# Here LBFGS does a great job, although each step is quite computationally expensive.
+# We get acceptable results in a reasonable time frame for 500 steps.
+res = Optimization.solve(prob, LBFGS(); callback = callback, maxiters = 500)
 
 using Plots, ColorSchemes, LaTeXStrings
 
 plot(loss_vector, legend=false, yaxis=:log, 
               xlabel="Steps", ylabel="Loss",dpi=600,
-              ylimits = (1e-6,1e2))
-savefig("PINN_images_5dof/loss_convergence")
+              ylimits = (1e0,1e4))
+savefig("loss_convergence")
 
 
 phi = discretization.phi
@@ -118,84 +133,66 @@ meshX = vec((xs'.*ones(size(ys)))')
 meshY = vec((ones(size(xs))'.*ys)')
 
 # Draw the reference geometry
-refplot    = scatter(meshX, meshY, title = L"\mathrm{Reference \ body.}", mc=:gray, 
-                  markersize=1.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1), 
+refplot   = scatter(meshX, meshY, title = L"\mathrm{Reference \ body.}", mc=:gray, 
+                  markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.1), ylimits = (-0.1, 2.1), 
                   xlabel=L"$X_1, \ \mathrm{mm}.$", ylabel=L"$X_2, \ \mathrm{mm}.$", aspect_ratio=:equal) 
-scatter(refplot, legend=false, size = (400, 300), dpi=600, aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_ref_5dof")
+scatter(refplot, legend=false, size = (800, 400), dpi=600, aspect_ratio=:equal)
+savefig("2d_hyperElas_refplot")
+
+
+# Draw the reference geometry
+refplot   = scatter(meshX +u_predict[1], meshY + u_predict[2], title = L"\mathrm{Deformed \ body.}", mc=:gray, 
+                  markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.1), ylimits = (-0.1, 2.1), 
+                  xlabel=L"$X_1, \ \mathrm{mm}.$", ylabel=L"$X_2, \ \mathrm{mm}.$", aspect_ratio=:equal) 
+scatter(refplot, legend=false, size = (800, 400), dpi=600, aspect_ratio=:equal)
+savefig("2d_hyperElas_defplot")
 
 # Draw contours of dofs on deformed geometry
-defplot_u1 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2], 
+defplot_u1 = scatter(meshX + u_predict[1], meshY + u_predict[2], 
                      title = L"\mathrm{Contours \ of \ } u_1(x,y) \mathrm{\ (mm).}",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[1],  c =:coolwarm, aspect_ratio=:equal)
 scatter(defplot_u1, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_def_u1_5dof")
+savefig("2d_hypElas_def_u1_6dof")
 
-defplot_u2 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
+defplot_u2 = scatter(meshX + u_predict[1], meshY + u_predict[2],
                      title = L"\mathrm{Contours \ of \ } u_2(x,y) \mathrm{\ (mm).}",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[2], c =:coolwarm )
 scatter(defplot_u2, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_def_u2_5dof")
+savefig("2d_hypElas_def_u2_6dof")
 
-defplot_σ11 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
-                     title = L"\mathrm{Contours \ of \ } \sigma_{11}(x,y) \mathrm{\ (mm).}",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+defplot_TR11 = scatter(meshX + u_predict[1], meshY + u_predict[2],
+                     title = L"\mathrm{Contours \ of \ } T_{{R},11}(x,y) \mathrm{\ (mm).}",
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[3], c =:coolwarm )
-scatter(defplot_σ11, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_def_sigma11_5dof")
+scatter(defplot_TR11, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
+savefig("2d_hypElas_def_TR11_6dof")
 
-defplot_σ22 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
-                     title = L"\mathrm{Contours \ of \ } \sigma_{22}(x,y) \mathrm{\ (mm).}",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+
+defplot_TR22 = scatter(meshX + u_predict[1], meshY + u_predict[2],
+                     title = L"\mathrm{Contours \ of \ } T_{{R},22}(x,y) \mathrm{\ (mm).}",
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[4], c =:coolwarm )
-scatter(defplot_σ22, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_def_sigma22_5dof")
+scatter(defplot_TR22, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
+savefig("2d_hypElas_def_TR22_6dof")
 
-defplot_σ12 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
-                     title = L"\mathrm{Contours \ of \ } \sigma_{12}(x,y) \mathrm{\ (mm).}",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+defplot_TR12 = scatter(meshX + u_predict[1], meshY + u_predict[2],
+                     title = L"\mathrm{Contours \ of \ } T_{{R},12}(x,y) \mathrm{\ (mm).}",
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[5], c =:coolwarm )
-scatter(defplot_σ12, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/2d_linElas_def_sigma12_5dof")
+scatter(defplot_TR12, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
+savefig("2d_hypElas_def_TR12_6dof")
 
-using CSV, DataFrames
-
-FEniCS_u1_data = CSV.read("err_data/SS_FEniCS_u1.csv", DataFrame, header=false)
-FEniCS_u2_data = CSV.read("err_data/SS_FEniCS_u2.csv", DataFrame, header=false)
-
-FEniCS_u1_arr = Matrix(FEniCS_u1_data)
-FEniCS_u2_arr = Matrix(FEniCS_u2_data)
-
-FEniCS_u1_err = abs.(u_predict[1] .- FEniCS_u1_arr)
-FEniCS_u2_err = abs.(u_predict[2] .- FEniCS_u2_arr)
-
-# Draw contours of dofs on deformed geometry
-FEniCSplot_u1 = scatter(meshX + 10*FEniCS_u1_arr, meshY + 10*FEniCS_u2_arr, 
-                     title = L"\mathrm{Error \ in \ } u_1(x,y)",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
+defplot_TR21 = scatter(meshX + u_predict[1], meshY + u_predict[2],
+                     title = L"\mathrm{Contours \ of \ } T_{{R},21}(x,y) \mathrm{\ (mm).}",
+                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 2.1),
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
-                     marker_z=FEniCS_u1_err,  c =:coolwarm, aspect_ratio=:equal)
-scatter(FEniCSplot_u1, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/SS_FEniCS_u1_err.png")
-
-# Draw contours of dofs on deformed geometry
-FEniCSplot_u2 = scatter(meshX + 10*FEniCS_u1_arr, meshY + 10*FEniCS_u2_arr, 
-                     title = L"\mathrm{Error \ in \ } u_2(x,y)",
-                     markersize=2.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1),
-                     xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
-                     marker_z=FEniCS_u2_err,  c =:coolwarm, aspect_ratio=:equal)
-scatter(FEniCSplot_u2, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_5dof/SS_FEniCS_u2_err.png")
-
-u1_err_rms = sqrt(sum(FEniCS_u1_err.^2)/length(FEniCS_u1_err))
-u2_err_rms = sqrt(sum(FEniCS_u2_err.^2)/length(FEniCS_u2_err))
-
-
-
+                     marker_z=u_predict[6], c =:coolwarm )
+scatter(defplot_TR21, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
+savefig("2d_hypElas_def_TR21_6dof")
