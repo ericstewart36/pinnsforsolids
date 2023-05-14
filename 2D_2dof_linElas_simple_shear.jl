@@ -73,10 +73,12 @@ bcs_inner_loss_functions = sym_prob.loss_functions.bc_loss_functions
 loss_vector = Vector{Float64}()
 
 callback = function (p, l)
+    push!(loss_vector, l)
+    stepnum = length(loss_vector)
+    @info "Step number $stepnum."
     println("loss: ", l)
     println("pde_losses: ", map(l_ -> l_(p), pde_inner_loss_functions))
     println("bcs_losses: ", map(l_ -> l_(p), bcs_inner_loss_functions))
-    push!(loss_vector, l)
     return false
 end
 
@@ -92,20 +94,20 @@ res = Optimization.solve(prob,Adam(1.0e-4); callback = callback, maxiters=2000)
 prob = remake(prob, u0 = res.u)
 res = Optimization.solve(prob, LBFGS(); callback = callback, maxiters = 10000)
 
-using Plots, ColorSchemes
+using Plots, ColorSchemes,  LaTeXStrings
 
 
 plot(loss_vector, legend=false, yaxis=:log, 
               xlabel="Steps", ylabel="Loss",dpi=600,
               ylimits = (1e-4,1e1))
-savefig("PINN_images_2dof/loss_convergence")
+savefig("loss_convergence")
 
 phi = discretization.phi
 xs,ys = [infimum(d.domain):0.01:supremum(d.domain) for d in domains]
 
 minimizers_ = [res.u.depvar[sym_prob.depvars[i]] for i in 1:2]
 
-u_predict  = [[phi[i]([x,y],minimizers_[i])[1] for x in xs  for y in ys] for i in 1:2]
+u_predict  = [[phi[i]([x,y],minimizers_[i])[1] for y in ys  for x in xs] for i in 1:2]
 
 
 meshX = vec((xs'.*ones(size(ys)))')
@@ -116,7 +118,7 @@ refplot    = scatter(meshX, meshY, title = L"\mathrm{Reference \ body.}", mc=:gr
                   markersize=1.0,markerstrokewidth=0, xlimits=(-0.1, 1.2), ylimits = (-0.1, 1.1), 
                   xlabel=L"$X_1, \ \mathrm{mm}.$", ylabel=L"$X_2, \ \mathrm{mm}.$", aspect_ratio=:equal) 
 scatter(refplot, legend=false, size = (400, 300), dpi=600, aspect_ratio=:equal)
-savefig("PINN_images_2dof/2d_linElas_ref_5dof")
+savefig("2d_linElas_ref_5dof")
 
 # Draw contours of dofs on deformed geometry
 defplot_u1 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2], 
@@ -125,7 +127,7 @@ defplot_u1 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[1],  c =:coolwarm, aspect_ratio=:equal)
 scatter(defplot_u1, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_2dof/2d_linElas_def_u1_5dof")
+savefig("2d_linElas_def_u1_5dof")
 
 defplot_u2 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
                      title = L"\mathrm{Contours \ of \ } u_2(x,y) \mathrm{\ (mm).}",
@@ -133,13 +135,13 @@ defplot_u2 = scatter(meshX + 10*u_predict[1], meshY + 10*u_predict[2],
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=u_predict[2], c =:coolwarm )
 scatter(defplot_u2, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_2dof/2d_linElas_def_u2_5dof")
+savefig("2d_linElas_def_u2_5dof")
 
 
 using CSV, DataFrames
 
-FEniCS_u1_data = CSV.read("err_data/SS_FEniCS_u1.csv", DataFrame, header=false)
-FEniCS_u2_data = CSV.read("err_data/SS_FEniCS_u2.csv", DataFrame, header=false)
+FEniCS_u1_data = CSV.read("SS_FEniCS_u1.csv", DataFrame, header=false)
+FEniCS_u2_data = CSV.read("SS_FEniCS_u2.csv", DataFrame, header=false)
 
 FEniCS_u1_arr = Matrix(FEniCS_u1_data)
 FEniCS_u2_arr = Matrix(FEniCS_u2_data)
@@ -154,7 +156,7 @@ FEniCSplot_u1 = scatter(meshX + 10*FEniCS_u1_arr, meshY + 10*FEniCS_u2_arr,
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=FEniCS_u1_err,  c =:coolwarm, aspect_ratio=:equal)
 scatter(FEniCSplot_u1, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_2dof/SS_FEniCS_u1_err.png")
+savefig("SS_FEniCS_u1_err.png")
 
 # Draw contours of dofs on deformed geometry
 FEniCSplot_u2 = scatter(meshX + 10*FEniCS_u1_arr, meshY + 10*FEniCS_u2_arr, 
@@ -163,7 +165,7 @@ FEniCSplot_u2 = scatter(meshX + 10*FEniCS_u1_arr, meshY + 10*FEniCS_u2_arr,
                      xlabel=L"$x_1, \ \mathrm{mm}.$", ylabel=L"$x_2 \ \mathrm{mm}.$", 
                      marker_z=FEniCS_u2_err,  c =:coolwarm, aspect_ratio=:equal)
 scatter(FEniCSplot_u2, legend=false, dpi=600, size = (800, 400), aspect_ratio=:equal)
-savefig("PINN_images_2dof/SS_FEniCS_u2_err.png")
+savefig("SS_FEniCS_u2_err.png")
 
 u1_err_rms = sqrt(sum(FEniCS_u1_err.^2)/length(FEniCS_u1_err))
 u2_err_rms = sqrt(sum(FEniCS_u2_err.^2)/length(FEniCS_u2_err))
