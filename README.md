@@ -1,6 +1,6 @@
 # PINNs for continuum mechanics of solids
 
-This repository contains all Julia PINN codes and Python FEniCS codes used in my final project for MIT course 18.337 in Spring 2023:
+This repository contains all Julia PINN codes and Python FEniCS codes as part of MIT course 18.337 in Spring 2023:
 
 ***Physics-informed neural networks (PINNs) versus finite elements for solving PDEs in continuum mechanics of solids***.
 
